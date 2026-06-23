@@ -66,8 +66,14 @@ const CreateSession = z.object({
   // Specific to hosted steel
   logSinkUrl: z.string().optional().describe("Deprecated: Log sink URL to use for the session"),
   extensions: z.array(z.string()).optional().describe("Extensions to use for the session"),
-  persist: z.boolean().optional().describe("Flag to indicate if session should be persisted"),
-  userDataDir: z.string().optional().describe("User data directory path to use for the session"),
+  persist: z
+    .boolean()
+    .optional()
+    .describe("Deprecated and ignored. Sessions always use ephemeral profiles."),
+  userDataDir: z
+    .string()
+    .optional()
+    .describe("Deprecated and ignored. Sessions always use Steel-owned ephemeral profiles."),
   timezone: z.string().optional().describe("Timezone to use for the session"),
   dimensions: z
     .object({

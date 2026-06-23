@@ -1,8 +1,7 @@
 import { FastifyBaseLogger } from "fastify";
-import { mkdir } from "fs/promises";
+import { mkdir, mkdtemp, rm } from "fs/promises";
 import os from "os";
-import path, { dirname } from "path";
-import { fileURLToPath } from "url";
+import path from "path";
 import { v4 as uuidv4 } from "uuid";
 import { env } from "../env.js";
 import { BrowserFingerprintWithHeaders } from "fingerprint-generator";
@@ -50,6 +49,8 @@ const defaultSession = {
   solveCaptcha: false,
 };
 
+const ephemeralProfileRoot = path.join(os.tmpdir(), "steel-sessions");
+
 export type ProxyFactory = (
   proxyUrl: string,
   options?: OptimizeBandwidthOptions,
@@ -61,6 +62,7 @@ export class SessionService {
   private seleniumService: SeleniumService;
   private fileService: FileService;
   private timezoneFetcher: TimezoneFetcher;
+  private activeProfileDir: string | null = null;
   public proxyFactory: ProxyFactory = (proxyUrl) => new ProxyServer(proxyUrl);
 
   public pastSessions: Session[] = [];
@@ -77,6 +79,7 @@ export class SessionService {
     this.fileService = config.fileService;
     this.logger = config.logger;
     this.timezoneFetcher = new TimezoneFetcher(config.logger);
+    this.cdpService.setDisconnectHandler(() => this.handleBrowserDisconnect());
     this.activeSession = {
       id: uuidv4(),
       createdAt: new Date().toISOString(),
@@ -101,8 +104,6 @@ export class SessionService {
     isSelenium?: boolean;
     fingerprint?: BrowserFingerprintWithHeaders;
     logSinkUrl?: string;
-    userDataDir?: string;
-    persist?: boolean;
     blockAds?: boolean;
     optimizeBandwidth?: boolean | OptimizeBandwidthOptions;
     extensions?: string[];
@@ -140,6 +141,7 @@ export class SessionService {
       dangerouslyLogRequestDetails,
       caCertificates,
     } = options;
+    const resolvedSessionId = sessionId || uuidv4();
 
     // start fetching timezone as early as possible
     let timezonePromise: Promise<string>;
@@ -166,7 +168,7 @@ export class SessionService {
         : resolvedDimensions;
 
     await this.resetSessionInfo({
-      id: sessionId || uuidv4(),
+      id: resolvedSessionId,
       status: "live",
       proxy: proxyUrl,
       solveCaptcha: false,
@@ -174,12 +176,6 @@ export class SessionService {
       isSelenium,
       deviceConfig,
     });
-
-    const userDataDir =
-      options.userDataDir || options.persist === true
-        ? path.join(dirname(fileURLToPath(import.meta.url)), "..", "..", "user-data-dir")
-        : env.CHROME_USER_DATA_DIR || path.join(os.tmpdir(), "steel-chrome");
-    await mkdir(userDataDir, { recursive: true });
 
     const defaultUserPreferences = {
       plugins: {
@@ -207,66 +203,77 @@ export class SessionService {
 
     const normalizedOptimize = normalizeOptimizeBandwidth(optimizeBandwidth);
 
-    if (proxyUrl) {
-      this.activeSession.proxyServer = await this.proxyFactory(proxyUrl, normalizedOptimize);
-      await this.activeSession.proxyServer.listen();
-    }
+    try {
+      const userDataDir = await this.createEphemeralProfileDir();
 
-    const browserLauncherOptions: BrowserLauncherOptions = {
-      options: {
-        headless: headless ?? env.CHROME_HEADLESS,
-        proxyUrl: this.activeSession.proxyServer?.url,
-      },
-      sessionContext,
-      userAgent,
-      blockAds,
-      fingerprint,
-      optimizeBandwidth: normalizedOptimize,
-      extensions: extensions || [],
-      logSinkUrl,
-      timezone: timezonePromise,
-      dimensions: finalDimensions,
-      userDataDir,
-      userPreferences: mergedUserPreferences,
-      extra,
-      credentials,
-      skipFingerprintInjection,
-      deviceConfig,
-      fullscreen,
-      dangerouslyLogRequestDetails,
-      caCertificates,
-    };
+      if (proxyUrl) {
+        this.activeSession.proxyServer = await this.proxyFactory(proxyUrl, normalizedOptimize);
+        await this.activeSession.proxyServer.listen();
+      }
 
-    if (isSelenium) {
-      await this.cdpService.shutdown(ShutdownReason.MODE_SWITCH);
-      await this.seleniumService.launch(browserLauncherOptions);
-
-      Object.assign(this.activeSession, {
-        websocketUrl: "",
-        debugUrl: "",
-        sessionViewerUrl: "",
-        userAgent:
-          userAgent ||
-          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        dimensions: this.cdpService.getDimensions(),
+      const browserLauncherOptions: BrowserLauncherOptions = {
+        options: {
+          headless: headless ?? env.CHROME_HEADLESS,
+          proxyUrl: this.activeSession.proxyServer?.url,
+        },
+        sessionContext,
+        userAgent,
+        blockAds,
+        fingerprint,
+        optimizeBandwidth: normalizedOptimize,
+        extensions: extensions || [],
+        logSinkUrl,
+        timezone: timezonePromise,
+        dimensions: finalDimensions,
+        userDataDir,
+        userPreferences: mergedUserPreferences,
+        extra,
+        credentials,
+        skipFingerprintInjection,
         deviceConfig,
-      });
+        fullscreen,
+        dangerouslyLogRequestDetails,
+        caCertificates,
+      };
 
-      return this.activeSession;
-    } else {
-      await this.cdpService.startNewSession(browserLauncherOptions);
+      if (isSelenium) {
+        await this.cdpService.shutdown(ShutdownReason.MODE_SWITCH);
+        await this.seleniumService.launch(browserLauncherOptions);
 
-      Object.assign(this.activeSession, {
-        websocketUrl: getBaseUrl("ws"),
-        debugUrl: getUrl("v1/sessions/debug"),
-        debuggerUrl: getUrl("v1/devtools/inspector.html"),
-        sessionViewerUrl: getBaseUrl(),
-        userAgent:
-          this.cdpService.getUserAgent() ||
-          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        dimensions: this.cdpService.getDimensions(),
-        deviceConfig,
+        Object.assign(this.activeSession, {
+          websocketUrl: "",
+          debugUrl: "",
+          sessionViewerUrl: "",
+          userAgent:
+            userAgent ||
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+          dimensions: this.cdpService.getDimensions(),
+          deviceConfig,
+        });
+
+        return this.activeSession;
+      } else {
+        await this.cdpService.startNewSession(browserLauncherOptions);
+
+        Object.assign(this.activeSession, {
+          websocketUrl: getBaseUrl("ws"),
+          debugUrl: getUrl("v1/sessions/debug"),
+          debuggerUrl: getUrl("v1/devtools/inspector.html"),
+          sessionViewerUrl: getBaseUrl(),
+          userAgent:
+            this.cdpService.getUserAgent() ||
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+          dimensions: this.cdpService.getDimensions(),
+          deviceConfig,
+        });
+      }
+    } catch (error) {
+      await this.cleanupActiveProfileDir();
+      await this.resetSessionInfo({
+        id: uuidv4(),
+        status: "idle",
       });
+      throw error;
     }
 
     return this.activeSession;
@@ -291,6 +298,8 @@ export class SessionService {
     }
 
     const releasedSession = this.activeSession;
+
+    await this.cleanupActiveProfileDir();
 
     await this.resetSessionInfo({
       id: uuidv4(),
@@ -322,6 +331,49 @@ export class SessionService {
     };
 
     return this.activeSession;
+  }
+
+  private async createEphemeralProfileDir(): Promise<string> {
+    await mkdir(ephemeralProfileRoot, { recursive: true });
+    const profileDir = await mkdtemp(path.join(ephemeralProfileRoot, "session-"));
+    this.activeProfileDir = profileDir;
+    return profileDir;
+  }
+
+  private async cleanupActiveProfileDir(): Promise<void> {
+    const profileDir = this.activeProfileDir;
+    this.activeProfileDir = null;
+    await this.removeOwnedProfileDir(profileDir);
+  }
+
+  private async removeOwnedProfileDir(profileDir: string | null): Promise<void> {
+    if (!profileDir) {
+      return;
+    }
+
+    const root = path.resolve(ephemeralProfileRoot);
+    const target = path.resolve(profileDir);
+    const relative = path.relative(root, target);
+
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+      this.logger.warn(`[SessionService] Refusing to remove non-owned profile dir: ${profileDir}`);
+      return;
+    }
+
+    try {
+      await rm(target, { recursive: true, force: true });
+    } catch (error) {
+      this.logger.warn(`[SessionService] Failed to remove profile dir ${profileDir}: ${error}`);
+    }
+  }
+
+  private async handleBrowserDisconnect(): Promise<void> {
+    if (this.activeSession.status === "live") {
+      await this.endSession();
+      return;
+    }
+
+    await this.cdpService.endSession();
   }
 
   public setProxyFactory(factory: ProxyFactory) {

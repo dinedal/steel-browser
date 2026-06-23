@@ -247,11 +247,11 @@ export type CreateSession = {
    */
   extensions?: Array<string>;
   /**
-   * Flag to indicate if session should be persisted
+   * Deprecated and ignored. Sessions always use ephemeral profiles.
    */
   persist?: boolean;
   /**
-   * User data directory path to use for the session
+   * Deprecated and ignored. Sessions always use Steel-owned ephemeral profiles.
    */
   userDataDir?: string;
   /**

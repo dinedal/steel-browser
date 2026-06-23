@@ -481,11 +481,11 @@ export const CreateSessionSchema = {
     },
     persist: {
       type: "boolean",
-      description: "Flag to indicate if session should be persisted",
+      description: "Deprecated and ignored. Sessions always use ephemeral profiles.",
     },
     userDataDir: {
       type: "string",
-      description: "User data directory path to use for the session",
+      description: "Deprecated and ignored. Sessions always use Steel-owned ephemeral profiles.",
     },
     timezone: {
       type: "string",

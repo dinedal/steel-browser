@@ -31,7 +31,9 @@ describe("handleLaunchBrowserSession", () => {
 
     const request = {
       body: {
+        persist: true,
         sessionId: "session-1",
+        userDataDir: "/tmp/caller-profile",
       },
       headers: {
         host: "steel.example.com",
@@ -47,6 +49,8 @@ describe("handleLaunchBrowserSession", () => {
     const result = await handleLaunchBrowserSession(server, request, reply);
 
     expect(startSession).toHaveBeenCalledOnce();
+    expect(startSession.mock.calls[0][0]).not.toHaveProperty("persist");
+    expect(startSession.mock.calls[0][0]).not.toHaveProperty("userDataDir");
     expect(result.websocketUrl).toBe("wss://steel.example.com/");
     expect(result.debugUrl).toBe("https://steel.example.com/v1/sessions/debug");
     expect(result.debuggerUrl).toBe("https://steel.example.com/v1/devtools/inspector.html");

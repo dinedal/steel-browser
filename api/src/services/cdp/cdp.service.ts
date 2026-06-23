@@ -155,7 +155,6 @@ export class CDPService extends EventEmitter {
       },
       blockAds: true,
       extensions: [],
-      userDataDir: env.CHROME_USER_DATA_DIR || path.join(os.tmpdir(), "steel-chrome"),
       timezone: coldStartTimezone,
       userPreferences: {
         plugins: {

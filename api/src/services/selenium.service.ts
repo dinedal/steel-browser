@@ -18,13 +18,14 @@ export class SeleniumService extends EventEmitter {
   }
 
   public async getChromeArgs(): Promise<string[]> {
-    const { options, userAgent } = this.launchOptions ?? {};
+    const { options, userAgent, userDataDir } = this.launchOptions ?? {};
     return [
       "disable-dev-shm-usage",
       "no-sandbox",
       "enable-javascript",
       userAgent ? `user-agent=${userAgent}` : "",
       options?.proxyUrl ? `proxy-server=${options.proxyUrl}` : "",
+      userDataDir ? `user-data-dir=${userDataDir}` : "",
       ...(options?.args?.map((arg) => (arg.startsWith("--") ? arg.slice(2) : arg)) || []),
     ].filter(Boolean);
   }
