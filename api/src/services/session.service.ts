@@ -56,6 +56,15 @@ export type ProxyFactory = (
   options?: OptimizeBandwidthOptions,
 ) => Promise<IProxyServer> | IProxyServer;
 
+export class SessionAlreadyActiveError extends Error {
+  public readonly statusCode = 409;
+
+  constructor(sessionId: string) {
+    super(`Session ${sessionId} is already live in this Steel process`);
+    this.name = "SessionAlreadyActiveError";
+  }
+}
+
 export class SessionService {
   private logger: FastifyBaseLogger;
   private cdpService: CDPService;
@@ -63,6 +72,7 @@ export class SessionService {
   private fileService: FileService;
   private timezoneFetcher: TimezoneFetcher;
   private activeProfileDir: string | null = null;
+  private lifecycleLock: Promise<void> = Promise.resolve();
   public proxyFactory: ProxyFactory = (proxyUrl) => new ProxyServer(proxyUrl);
 
   public pastSessions: Session[] = [];
@@ -119,6 +129,39 @@ export class SessionService {
     dangerouslyLogRequestDetails?: boolean;
     caCertificates?: string[];
   }): Promise<SessionDetails> {
+    return this.runWithLifecycleLock("startSession", () => this.startSessionLocked(options));
+  }
+
+  private async startSessionLocked(options: {
+    sessionId?: string;
+    proxyUrl?: string;
+    userAgent?: string;
+    sessionContext?: {
+      cookies?: CookieData[];
+      localStorage?: Record<string, Record<string, any>>;
+    };
+    isSelenium?: boolean;
+    fingerprint?: BrowserFingerprintWithHeaders;
+    logSinkUrl?: string;
+    blockAds?: boolean;
+    optimizeBandwidth?: boolean | OptimizeBandwidthOptions;
+    extensions?: string[];
+    timezone?: string;
+    dimensions?: { width: number; height: number };
+    extra?: BrowserLaunchExtra;
+    credentials: CredentialsOptions;
+    skipFingerprintInjection?: boolean;
+    userPreferences?: Record<string, any>;
+    deviceConfig?: { device: "desktop" | "mobile" };
+    fullscreen?: boolean;
+    headless?: boolean;
+    dangerouslyLogRequestDetails?: boolean;
+    caCertificates?: string[];
+  }): Promise<SessionDetails> {
+    if (this.activeSession.status === "live") {
+      throw new SessionAlreadyActiveError(this.activeSession.id);
+    }
+
     const {
       sessionId,
       proxyUrl,
@@ -280,6 +323,14 @@ export class SessionService {
   }
 
   public async endSession(): Promise<SessionDetails> {
+    return this.runWithLifecycleLock("endSession", () => this.endSessionLocked());
+  }
+
+  private async endSessionLocked(): Promise<SessionDetails> {
+    if (this.activeSession.status !== "live") {
+      return this.activeSession;
+    }
+
     this.activeSession.complete();
     this.activeSession.status = "released";
     this.activeSession.duration =
@@ -309,6 +360,27 @@ export class SessionService {
     this.pastSessions.push(releasedSession);
 
     return releasedSession;
+  }
+
+  private async runWithLifecycleLock<T>(
+    operation: "startSession" | "endSession",
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const previousOperation = this.lifecycleLock;
+    let release: () => void = () => {};
+
+    this.lifecycleLock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await previousOperation;
+
+    try {
+      return await fn();
+    } finally {
+      release();
+      this.logger.debug(`[SessionService] Completed lifecycle operation: ${operation}`);
+    }
   }
 
   private async resetSessionInfo(overrides?: Partial<SessionDetails>): Promise<SessionDetails> {
@@ -368,12 +440,14 @@ export class SessionService {
   }
 
   private async handleBrowserDisconnect(): Promise<void> {
-    if (this.activeSession.status === "live") {
-      await this.endSession();
-      return;
-    }
+    await this.runWithLifecycleLock("endSession", async () => {
+      if (this.activeSession.status === "live") {
+        await this.endSessionLocked();
+        return;
+      }
 
-    await this.cdpService.endSession();
+      await this.cdpService.endSession();
+    });
   }
 
   public setProxyFactory(factory: ProxyFactory) {

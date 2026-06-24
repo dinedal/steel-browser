@@ -4,6 +4,7 @@ import { getErrors } from "../../utils/errors.js";
 import { CreateSessionRequest, SessionDetails, SessionStreamRequest } from "./sessions.schema.js";
 import { CookieData } from "../../services/context/types.js";
 import { getUrl, getBaseUrl, getBaseUrlFromRequest, getUrlFromRequest } from "../../utils/url.js";
+import { SessionAlreadyActiveError } from "../../services/session.service.js";
 
 export const handleLaunchBrowserSession = async (
   server: FastifyInstance,
@@ -64,6 +65,9 @@ export const handleLaunchBrowserSession = async (
   } catch (e: unknown) {
     server.log.error({ err: e }, "Failed lauching browser session");
     const error = getErrors(e);
+    if (e instanceof SessionAlreadyActiveError) {
+      return reply.code(409).send({ success: false, message: error });
+    }
     return reply.code(500).send({ success: false, message: error });
   }
 };

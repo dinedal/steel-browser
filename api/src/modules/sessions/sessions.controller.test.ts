@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { handleLaunchBrowserSession } from "./sessions.controller.js";
+import { SessionAlreadyActiveError } from "../../services/session.service.js";
 
 describe("handleLaunchBrowserSession", () => {
   it("returns request-scoped public urls for launched sessions", async () => {
@@ -55,5 +56,38 @@ describe("handleLaunchBrowserSession", () => {
     expect(result.debugUrl).toBe("https://steel.example.com/v1/sessions/debug");
     expect(result.debuggerUrl).toBe("https://steel.example.com/v1/devtools/inspector.html");
     expect(result.sessionViewerUrl).toBe("https://steel.example.com/");
+  });
+
+  it("returns 409 when the pod already has a live session", async () => {
+    const startSession = vi
+      .fn()
+      .mockRejectedValue(new SessionAlreadyActiveError("00000000-0000-4000-8000-000000000001"));
+
+    const server = {
+      sessionService: { startSession },
+      log: { error: vi.fn() },
+    } as any;
+
+    const request = {
+      body: {
+        sessionId: "00000000-0000-4000-8000-000000000002",
+      },
+      headers: {
+        host: "steel.example.com",
+      },
+    } as any;
+
+    const reply = {
+      code: vi.fn().mockReturnThis(),
+      send: vi.fn(),
+    } as any;
+
+    await handleLaunchBrowserSession(server, request, reply);
+
+    expect(reply.code).toHaveBeenCalledWith(409);
+    expect(reply.send).toHaveBeenCalledWith({
+      success: false,
+      message: "Session 00000000-0000-4000-8000-000000000001 is already live in this Steel process",
+    });
   });
 });

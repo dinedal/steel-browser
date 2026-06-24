@@ -3,7 +3,7 @@ import os from "os";
 import path from "path";
 import { describe, expect, it, vi } from "vitest";
 
-import { SessionService } from "./session.service.js";
+import { SessionAlreadyActiveError, SessionService } from "./session.service.js";
 
 const profileRoot = path.join(os.tmpdir(), "steel-sessions");
 
@@ -151,5 +151,85 @@ describe("SessionService ephemeral profiles", () => {
     expect(service.activeSession.status).toBe("idle");
     expect(service.pastSessions).toHaveLength(1);
     expect(await exists(profileDir)).toBe(false);
+  });
+
+  it("serializes concurrent starts and rejects the second start while one session is live", async () => {
+    const { cdpService, service } = createService();
+    const launch = Promise.withResolvers<object>();
+    cdpService.startNewSession.mockReturnValueOnce(launch.promise as any);
+
+    const firstStart = service.startSession(
+      baseStartOptions("00000000-0000-4000-8000-000000000006"),
+    );
+
+    await vi.waitFor(() => expect(cdpService.startNewSession).toHaveBeenCalledTimes(1));
+
+    const secondStart = service.startSession(
+      baseStartOptions("00000000-0000-4000-8000-000000000007"),
+    );
+
+    await Promise.resolve();
+    expect(cdpService.startNewSession).toHaveBeenCalledTimes(1);
+
+    launch.resolve({});
+
+    await expect(firstStart).resolves.toMatchObject({
+      id: "00000000-0000-4000-8000-000000000006",
+      status: "live",
+    });
+    await expect(secondStart).rejects.toBeInstanceOf(SessionAlreadyActiveError);
+    expect(cdpService.startNewSession).toHaveBeenCalledTimes(1);
+
+    await service.endSession();
+  });
+
+  it("queues release behind an in-flight start", async () => {
+    const { cdpService, service } = createService();
+    const launch = Promise.withResolvers<object>();
+    cdpService.startNewSession.mockReturnValueOnce(launch.promise as any);
+
+    const start = service.startSession(
+      baseStartOptions("00000000-0000-4000-8000-000000000008"),
+    );
+
+    await vi.waitFor(() => expect(cdpService.startNewSession).toHaveBeenCalledTimes(1));
+
+    const release = service.endSession();
+
+    await Promise.resolve();
+    expect(cdpService.endSession).not.toHaveBeenCalled();
+
+    launch.resolve({});
+
+    await start;
+    await release;
+
+    expect(cdpService.endSession).toHaveBeenCalledOnce();
+    expect(service.activeSession.status).toBe("idle");
+  });
+
+  it("serializes duplicate releases so CDP shutdown only runs once", async () => {
+    const { cdpService, service } = createService();
+    const shutdown = Promise.withResolvers<void>();
+
+    await service.startSession(baseStartOptions("00000000-0000-4000-8000-000000000009"));
+    cdpService.endSession.mockReturnValueOnce(shutdown.promise);
+
+    const firstRelease = service.endSession();
+
+    await vi.waitFor(() => expect(cdpService.endSession).toHaveBeenCalledTimes(1));
+
+    const secondRelease = service.endSession();
+
+    await Promise.resolve();
+    expect(cdpService.endSession).toHaveBeenCalledTimes(1);
+
+    shutdown.resolve();
+
+    await firstRelease;
+    await secondRelease;
+
+    expect(cdpService.endSession).toHaveBeenCalledTimes(1);
+    expect(service.activeSession.status).toBe("idle");
   });
 });
