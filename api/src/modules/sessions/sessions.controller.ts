@@ -4,7 +4,10 @@ import { getErrors } from "../../utils/errors.js";
 import { CreateSessionRequest, SessionDetails, SessionStreamRequest } from "./sessions.schema.js";
 import { CookieData } from "../../services/context/types.js";
 import { getUrl, getBaseUrl, getBaseUrlFromRequest, getUrlFromRequest } from "../../utils/url.js";
-import { SessionAlreadyActiveError } from "../../services/session.service.js";
+import {
+  SessionAlreadyActiveError,
+  SessionNotCurrentError,
+} from "../../services/session.service.js";
 
 export const handleLaunchBrowserSession = async (
   server: FastifyInstance,
@@ -82,6 +85,27 @@ export const handleExitBrowserSession = async (
 
     reply.send({ success: true, ...sessionDetails });
   } catch (e: any) {
+    const error = getErrors(e);
+    return reply.code(500).send({ success: false, message: error });
+  }
+};
+
+export const handleReleaseBrowserSessionById = async (
+  server: FastifyInstance,
+  request: FastifyRequest<{ Params: { sessionId: string } }>,
+  reply: FastifyReply,
+) => {
+  try {
+    // The current-session check happens inside the service's lifecycle lock —
+    // do not read activeSession here, or a stale release could race a fresh
+    // start and release the successor session.
+    const sessionDetails = await server.sessionService.endSessionById(request.params.sessionId);
+
+    return reply.send({ success: true, ...sessionDetails });
+  } catch (e: unknown) {
+    if (e instanceof SessionNotCurrentError) {
+      return reply.code(404).send({ success: false, message: "session not current" });
+    }
     const error = getErrors(e);
     return reply.code(500).send({ success: false, message: error });
   }

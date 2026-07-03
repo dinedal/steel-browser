@@ -3,6 +3,7 @@ import {
   handleLaunchBrowserSession,
   handleGetBrowserContext,
   handleExitBrowserSession,
+  handleReleaseBrowserSessionById,
   handleGetSessionDetails,
   handleGetSessions,
   handleGetSessionStream,
@@ -112,16 +113,24 @@ async function routes(server: FastifyInstance) {
     {
       schema: {
         operationId: "release_browser_session",
-        description: "Release a browser session",
+        description:
+          "Release the browser session with the given ID. Returns 404 if that session is not the current live session.",
         tags: ["Sessions"],
         summary: "Release a browser session",
         response: {
           200: $ref("ReleaseSession"),
+          404: {
+            type: "object",
+            properties: {
+              success: { type: "boolean" },
+              message: { type: "string" },
+            },
+          },
         },
       },
     },
-    async (request: FastifyRequest, reply: FastifyReply) =>
-      handleExitBrowserSession(server, request, reply),
+    async (request: FastifyRequest<{ Params: { sessionId: string } }>, reply: FastifyReply) =>
+      handleReleaseBrowserSessionById(server, request, reply),
   );
 
   server.post(

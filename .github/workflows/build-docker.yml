@@ -1,9 +1,13 @@
 name: Build and Push Latest Docker Image to GHCR
 
+# Gamma fork: upstream ran this on every push to main, publishing
+# ghcr.io/steel-dev/steel-browser{,-api,-ui}:latest to upstream's GHCR org.
+# That is not our deployment path (Gamma deploys via a manual docker build/push
+# to Gamma ECR), so the automatic push trigger is removed. Manual dispatch is
+# kept only to preserve the workflow for upstream syncs; do not run it from
+# this fork.
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   push_to_registry:

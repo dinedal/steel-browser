@@ -188,9 +188,7 @@ describe("SessionService ephemeral profiles", () => {
     const launch = Promise.withResolvers<object>();
     cdpService.startNewSession.mockReturnValueOnce(launch.promise as any);
 
-    const start = service.startSession(
-      baseStartOptions("00000000-0000-4000-8000-000000000008"),
-    );
+    const start = service.startSession(baseStartOptions("00000000-0000-4000-8000-000000000008"));
 
     await vi.waitFor(() => expect(cdpService.startNewSession).toHaveBeenCalledTimes(1));
 
@@ -231,5 +229,29 @@ describe("SessionService ephemeral profiles", () => {
 
     expect(cdpService.endSession).toHaveBeenCalledTimes(1);
     expect(service.activeSession.status).toBe("idle");
+  });
+
+  it("caps pastSessions at the 100 most recent releases", async () => {
+    const { service } = createService();
+    const totalReleases = 105;
+    const cap = 100;
+    const ids: string[] = [];
+
+    for (let i = 0; i < totalReleases; i++) {
+      const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+      ids.push(id);
+      await service.startSession(baseStartOptions(id));
+      await service.endSession();
+    }
+
+    expect(service.pastSessions).toHaveLength(cap);
+
+    const pastIds = service.pastSessions.map((session) => session.id);
+    // Oldest releases are evicted...
+    for (const evictedId of ids.slice(0, totalReleases - cap)) {
+      expect(pastIds).not.toContain(evictedId);
+    }
+    // ...and the most recent releases are retained, in order.
+    expect(pastIds).toEqual(ids.slice(totalReleases - cap));
   });
 });

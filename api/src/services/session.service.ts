@@ -51,6 +51,11 @@ const defaultSession = {
 
 const ephemeralProfileRoot = path.join(os.tmpdir(), "steel-sessions");
 
+// Cap the past-session history so a long-lived pod doesn't grow pastSessions
+// (and GET /v1/sessions) without bound. Evicting old released sessions is safe
+// for by-ID lookups: any non-current ID already answers as a "released" stub.
+const MAX_PAST_SESSIONS = 100;
+
 export type ProxyFactory = (
   proxyUrl: string,
   options?: OptimizeBandwidthOptions,
@@ -63,6 +68,18 @@ export class SessionAlreadyActiveError extends Error {
     super(`Session ${sessionId} is already live in this Steel process`);
     this.name = "SessionAlreadyActiveError";
   }
+}
+
+export class SessionNotCurrentError extends Error {
+  public readonly statusCode = 404;
+
+  constructor(sessionId: string) {
+    super("session not current");
+    this.name = "SessionNotCurrentError";
+    this.requestedSessionId = sessionId;
+  }
+
+  public readonly requestedSessionId: string;
 }
 
 export class SessionService {
@@ -326,6 +343,23 @@ export class SessionService {
     return this.runWithLifecycleLock("endSession", () => this.endSessionLocked());
   }
 
+  /**
+   * Release the current session only if `sessionId` matches the live active
+   * session. The ID check and the release run inside the same lifecycle lock
+   * acquisition, so a stale release can never race a fresh start and kill the
+   * successor session. Throws SessionNotCurrentError (404) otherwise — a
+   * released session's ID can never equal the current one, because release
+   * resets the active session to a fresh-UUID idle placeholder.
+   */
+  public async endSessionById(sessionId: string): Promise<SessionDetails> {
+    return this.runWithLifecycleLock("endSession", async () => {
+      if (this.activeSession.status !== "live" || this.activeSession.id !== sessionId) {
+        throw new SessionNotCurrentError(sessionId);
+      }
+      return this.endSessionLocked();
+    });
+  }
+
   private async endSessionLocked(): Promise<SessionDetails> {
     if (this.activeSession.status !== "live") {
       return this.activeSession;
@@ -358,6 +392,9 @@ export class SessionService {
     });
 
     this.pastSessions.push(releasedSession);
+    if (this.pastSessions.length > MAX_PAST_SESSIONS) {
+      this.pastSessions.splice(0, this.pastSessions.length - MAX_PAST_SESSIONS);
+    }
 
     return releasedSession;
   }
