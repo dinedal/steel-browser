@@ -25,76 +25,122 @@ export const SessionCredentials = z
   .optional()
   .describe("Configuration for session credentials");
 
-const CreateSession = z.object({
-  sessionId: z.string().uuid().optional().describe("Unique identifier for the session"),
-  proxyUrl: z.string().optional().describe("Proxy URL to use for the session"),
-  userAgent: z.string().optional().describe("User agent string to use for the session"),
-  sessionContext: SessionContextSchema.optional().describe(
-    "Session context data to be used in the created session",
-  ),
-  isSelenium: z.boolean().optional().describe("Indicates if Selenium is used in the session"),
-  blockAds: z
-    .boolean()
-    .optional()
-    .describe("Flag to indicate if ads should be blocked in the session"),
-  optimizeBandwidth: z
-    .union([
-      z.boolean(),
-      z
-        .object({
-          blockImages: z.boolean().optional(),
-          blockMedia: z.boolean().optional(),
-          blockStylesheets: z.boolean().optional(),
-          blockHosts: z.array(z.string()).optional(),
-          blockUrlPatterns: z.array(z.string()).optional(),
-        })
-        .strict(),
-    ])
-    .optional()
-    .describe(
-      "Enable bandwidth optimizations. Passing true enables all flags (except hosts/patterns). Object allows granular control.",
+const CreateSession = z
+  .object({
+    sessionId: z.string().uuid().optional().describe("Unique identifier for the session"),
+    proxyUrl: z.string().optional().describe("Proxy URL to use for the session"),
+    userAgent: z.string().optional().describe("User agent string to use for the session"),
+    sessionContext: SessionContextSchema.optional().describe(
+      "Session context data to be used in the created session",
     ),
-  skipFingerprintInjection: z
-    .boolean()
-    .optional()
-    .describe("Flag to indicate if fingerprint injection should be skipped for this session."),
-  deviceConfig: deviceConfigSchema,
-  fullscreen: z
-    .boolean()
-    .optional()
-    .describe("Launch the browser in fullscreen mode, covering the full screen with no Chrome UI."),
-  // Specific to hosted steel
-  logSinkUrl: z.string().optional().describe("Deprecated: Log sink URL to use for the session"),
-  extensions: z.array(z.string()).optional().describe("Extensions to use for the session"),
-  persist: z
-    .boolean()
-    .optional()
-    .describe("Deprecated and ignored. Sessions always use ephemeral profiles."),
-  userDataDir: z
-    .string()
-    .optional()
-    .describe("Deprecated and ignored. Sessions always use Steel-owned ephemeral profiles."),
-  timezone: z.string().optional().describe("Timezone to use for the session"),
-  dimensions: z
-    .object({
-      width: z.number(),
-      height: z.number(),
-    })
-    .optional()
-    .describe("Dimensions to use for the session"),
-  userPreferences: z
-    .record(z.string(), z.any())
-    .optional()
-    .describe(
-      "Chrome user preferences to customize browser behavior (e.g., font size, popup blocking, notification settings)",
-    ),
-  extra: z
-    .record(z.string(), z.any())
-    .optional()
-    .describe("Extra metadata to help initialize the session"),
-  credentials: SessionCredentials,
-  headless: z.boolean().optional().describe("Headless mode for the session"),
-});
+    isSelenium: z.boolean().optional().describe("Indicates if Selenium is used in the session"),
+    blockAds: z
+      .boolean()
+      .optional()
+      .describe("Flag to indicate if ads should be blocked in the session"),
+    optimizeBandwidth: z
+      .union([
+        z.boolean(),
+        z
+          .object({
+            blockImages: z.boolean().optional(),
+            blockMedia: z.boolean().optional(),
+            blockStylesheets: z.boolean().optional(),
+            blockHosts: z.array(z.string()).optional(),
+            blockUrlPatterns: z.array(z.string()).optional(),
+          })
+          .strict(),
+      ])
+      .optional()
+      .describe(
+        "Enable bandwidth optimizations. Passing true enables all flags (except hosts/patterns). Object allows granular control.",
+      ),
+    skipFingerprintInjection: z
+      .boolean()
+      .optional()
+      .describe("Flag to indicate if fingerprint injection should be skipped for this session."),
+    deviceConfig: deviceConfigSchema,
+    fullscreen: z
+      .boolean()
+      .optional()
+      .describe(
+        "Launch the browser in fullscreen mode, covering the full screen with no Chrome UI.",
+      ),
+    // Specific to hosted steel
+    logSinkUrl: z.string().optional().describe("Deprecated: Log sink URL to use for the session"),
+    extensions: z.array(z.string()).optional().describe("Extensions to use for the session"),
+    persist: z
+      .boolean()
+      .optional()
+      .describe("Deprecated and ignored. Sessions always use ephemeral profiles."),
+    userDataDir: z
+      .string()
+      .optional()
+      .describe("Deprecated and ignored. Sessions always use Steel-owned ephemeral profiles."),
+    timezone: z.string().optional().describe("Timezone to use for the session"),
+    dimensions: z
+      .object({
+        width: z.number(),
+        height: z.number(),
+      })
+      .optional()
+      .describe("Dimensions to use for the session"),
+    userPreferences: z
+      .record(z.string(), z.any())
+      .optional()
+      .describe(
+        "Chrome user preferences to customize browser behavior (e.g., font size, popup blocking, notification settings)",
+      ),
+    extra: z
+      .record(z.string(), z.any())
+      .optional()
+      .describe("Extra metadata to help initialize the session"),
+    credentials: SessionCredentials,
+    headless: z.boolean().optional().describe("Headless mode for the session"),
+    // Warmup: navigate the session's initial page before the create response
+    // returns, so an attaching CDP client adopts an already-booted page.
+    // Note: fastify validates requests against the JSON-schema form of this
+    // object (AJV), so cross-field rules like warmup+selenium are also enforced
+    // in the controller; the regex below compiles to a `pattern` AJV does run.
+    warmupUrl: z
+      .string()
+      .url()
+      .regex(/^https?:\/\//, "warmupUrl must be http(s)")
+      .optional()
+      .describe(
+        "Navigate the session's initial page to this URL and block the create response until it is ready",
+      ),
+    warmupInitScript: z
+      .string()
+      .max(4096)
+      .optional()
+      .describe(
+        "JS evaluated on every new document of the warmup page BEFORE navigation (Page.addScriptToEvaluateOnNewDocument parity with client-side addInitScript)",
+      ),
+    warmupReadyExpression: z
+      .string()
+      .max(2048)
+      .optional()
+      .describe(
+        "JS expression polled in the warmup page until truthy (e.g. '!!window.renderGmlPreview')",
+      ),
+    warmupTimeoutMs: z
+      .number()
+      .int()
+      .min(1000)
+      .max(60_000)
+      .optional()
+      .describe("Overall warmup budget (navigation + readiness). Default 20000."),
+  })
+  .superRefine((body, ctx) => {
+    if (body.warmupUrl && body.isSelenium) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["warmupUrl"],
+        message: "warmup is not supported for selenium sessions",
+      });
+    }
+  });
 
 const SessionDetails = z.object({
   id: z.string().uuid().describe("Unique identifier for the session"),

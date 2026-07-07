@@ -6,6 +6,8 @@ import {
   handleReleaseBrowserSessionById,
 } from "./sessions.controller.js";
 import { SessionAlreadyActiveError, SessionService } from "../../services/session.service.js";
+import { WarmupFailedError } from "../../services/cdp/utils/warmup.js";
+import browserSchemas from "./sessions.schema.js";
 
 const createLogger = () =>
   ({
@@ -29,6 +31,7 @@ const createServer = () => {
     setDisconnectHandler: vi.fn(),
     shutdown: vi.fn().mockResolvedValue(undefined),
     startNewSession: vi.fn().mockResolvedValue({}),
+    warmupPrimaryPage: vi.fn().mockResolvedValue(undefined),
   };
 
   const sessionService = new SessionService({
@@ -117,6 +120,122 @@ describe("handleLaunchBrowserSession", () => {
     expect(result.debugUrl).toBe("https://steel.example.com/v1/sessions/debug");
     expect(result.debuggerUrl).toBe("https://steel.example.com/v1/devtools/inspector.html");
     expect(result.sessionViewerUrl).toBe("https://steel.example.com/");
+  });
+
+  it("passes warmup fields through to startSession as the warmup object", async () => {
+    const startSession = vi.fn().mockResolvedValue({
+      id: "00000000-0000-4000-8000-000000000020",
+      createdAt: new Date().toISOString(),
+      status: "live",
+    });
+
+    const server = {
+      sessionService: { startSession },
+      log: { error: vi.fn() },
+    } as any;
+
+    const request = {
+      body: {
+        sessionId: "00000000-0000-4000-8000-000000000020",
+        warmupUrl: "https://render.example.com/shell",
+        warmupInitScript: "window.__warm = true;",
+        warmupReadyExpression: "!!window.renderGmlPreview",
+        warmupTimeoutMs: 30_000,
+      },
+      headers: { host: "steel.example.com" },
+    } as any;
+
+    await handleLaunchBrowserSession(server, request, createReply());
+
+    expect(startSession).toHaveBeenCalledOnce();
+    expect(startSession.mock.calls[0][0]).toMatchObject({
+      warmup: {
+        url: "https://render.example.com/shell",
+        initScript: "window.__warm = true;",
+        readyExpression: "!!window.renderGmlPreview",
+        timeoutMs: 30_000,
+      },
+    });
+    expect(startSession.mock.calls[0][0]).not.toHaveProperty("warmupUrl");
+  });
+
+  it("passes no warmup object for cold creates", async () => {
+    const startSession = vi.fn().mockResolvedValue({
+      id: "00000000-0000-4000-8000-000000000021",
+      createdAt: new Date().toISOString(),
+      status: "live",
+    });
+
+    const server = {
+      sessionService: { startSession },
+      log: { error: vi.fn() },
+    } as any;
+
+    const request = {
+      body: { sessionId: "00000000-0000-4000-8000-000000000021" },
+      headers: { host: "steel.example.com" },
+    } as any;
+
+    await handleLaunchBrowserSession(server, request, createReply());
+
+    expect(startSession.mock.calls[0][0].warmup).toBeUndefined();
+  });
+
+  it("returns 400 when warmup is combined with a selenium session", async () => {
+    const startSession = vi.fn();
+
+    const server = {
+      sessionService: { startSession },
+      log: { error: vi.fn() },
+    } as any;
+
+    const request = {
+      body: {
+        isSelenium: true,
+        warmupUrl: "https://render.example.com/shell",
+      },
+      headers: { host: "steel.example.com" },
+    } as any;
+
+    const reply = createReply();
+    await handleLaunchBrowserSession(server, request, reply);
+
+    expect(reply.code).toHaveBeenCalledWith(400);
+    expect(reply.send).toHaveBeenCalledWith({
+      success: false,
+      message: "warmup is not supported for selenium sessions",
+    });
+    expect(startSession).not.toHaveBeenCalled();
+  });
+
+  it("returns 502 warmup_failed when warmup fails", async () => {
+    const startSession = vi
+      .fn()
+      .mockRejectedValue(
+        new WarmupFailedError(
+          "https://render.example.com/shell",
+          "navigation",
+          new Error("net::ERR_CONNECTION_REFUSED"),
+        ),
+      );
+
+    const server = {
+      sessionService: { startSession },
+      log: { error: vi.fn() },
+    } as any;
+
+    const request = {
+      body: { warmupUrl: "https://render.example.com/shell" },
+      headers: { host: "steel.example.com" },
+    } as any;
+
+    const reply = createReply();
+    await handleLaunchBrowserSession(server, request, reply);
+
+    expect(reply.code).toHaveBeenCalledWith(502);
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({ success: false, code: "warmup_failed" }),
+    );
   });
 
   it("returns 409 when the pod already has a live session", async () => {
@@ -274,5 +393,74 @@ describe("handleGetSessionDetails", () => {
     expect(sessionService.pastSessions).toEqual(pastSessionsBefore);
     expect(sessionService.activeSession.id).toBe(liveId);
     expect(sessionService.activeSession.status).toBe("live");
+  });
+
+  it("reports idle for a warm create still in flight and live once it completes", async () => {
+    const { cdpService, server, sessionService } = createServer();
+    const warm = Promise.withResolvers<void>();
+    cdpService.warmupPrimaryPage.mockReturnValueOnce(warm.promise as any);
+
+    const start = sessionService.startSession({
+      ...startOptions(liveId),
+      warmup: { url: "https://render.example.com/shell" },
+    });
+
+    await vi.waitFor(() => expect(cdpService.warmupPrimaryPage).toHaveBeenCalledTimes(1));
+
+    const midWarmReply = createReply();
+    await handleGetSessionDetails(server, releaseRequest(liveId), midWarmReply);
+    expect(midWarmReply.send).toHaveBeenCalledWith(
+      expect.objectContaining({ id: liveId, status: "idle" }),
+    );
+
+    warm.resolve();
+    await start;
+
+    const liveReply = createReply();
+    await handleGetSessionDetails(server, releaseRequest(liveId), liveReply);
+    expect(liveReply.send).toHaveBeenCalledWith(
+      expect.objectContaining({ id: liveId, status: "live" }),
+    );
+
+    await sessionService.endSession();
+  });
+});
+
+describe("CreateSession schema warmup validation", () => {
+  it("accepts an https warmup create", () => {
+    const result = browserSchemas.CreateSession.safeParse({
+      warmupUrl: "https://render.example.com/shell",
+      warmupInitScript: "window.__warm = true;",
+      warmupReadyExpression: "!!window.renderGmlPreview",
+      warmupTimeoutMs: 30_000,
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects non-http(s) warmup URLs", () => {
+    const result = browserSchemas.CreateSession.safeParse({
+      warmupUrl: "file:///etc/passwd",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects warmup combined with selenium", () => {
+    const result = browserSchemas.CreateSession.safeParse({
+      warmupUrl: "https://render.example.com/shell",
+      isSelenium: true,
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects warmup timeouts above the 60s clamp", () => {
+    const result = browserSchemas.CreateSession.safeParse({
+      warmupUrl: "https://render.example.com/shell",
+      warmupTimeoutMs: 60_001,
+    });
+
+    expect(result.success).toBe(false);
   });
 });

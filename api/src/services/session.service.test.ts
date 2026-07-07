@@ -3,7 +3,12 @@ import os from "os";
 import path from "path";
 import { describe, expect, it, vi } from "vitest";
 
-import { SessionAlreadyActiveError, SessionService } from "./session.service.js";
+import {
+  SessionAlreadyActiveError,
+  SessionNotCurrentError,
+  SessionService,
+} from "./session.service.js";
+import { WarmupFailedError } from "./cdp/utils/warmup.js";
 
 const profileRoot = path.join(os.tmpdir(), "steel-sessions");
 
@@ -55,6 +60,7 @@ const createService = () => {
     }),
     shutdown: vi.fn().mockResolvedValue(undefined),
     startNewSession: vi.fn().mockResolvedValue({}),
+    warmupPrimaryPage: vi.fn().mockResolvedValue(undefined),
   };
 
   const seleniumService = {
@@ -253,5 +259,154 @@ describe("SessionService ephemeral profiles", () => {
     }
     // ...and the most recent releases are retained, in order.
     expect(pastIds).toEqual(ids.slice(totalReleases - cap));
+  });
+});
+
+describe("SessionService warmup", () => {
+  const warmupUrl = "https://render.example.com/shell";
+
+  it("runs warmup after launch with resolved defaults and returns a live session", async () => {
+    const { cdpService, service } = createService();
+
+    const session = await service.startSession({
+      ...baseStartOptions("00000000-0000-4000-8000-000000000010"),
+      warmup: {
+        url: warmupUrl,
+        initScript: "window.__warm = true;",
+        readyExpression: "!!window.renderGmlPreview",
+      },
+    });
+
+    expect(cdpService.warmupPrimaryPage).toHaveBeenCalledOnce();
+    expect(cdpService.warmupPrimaryPage).toHaveBeenCalledWith({
+      url: warmupUrl,
+      initScript: "window.__warm = true;",
+      readyExpression: "!!window.renderGmlPreview",
+      timeoutMs: 20_000,
+    });
+    expect(cdpService.startNewSession.mock.invocationCallOrder[0]).toBeLessThan(
+      cdpService.warmupPrimaryPage.mock.invocationCallOrder[0],
+    );
+    expect(session.status).toBe("live");
+
+    await service.endSession();
+  });
+
+  it("keeps the session idle until warmup completes", async () => {
+    const { cdpService, service } = createService();
+    const warm = Promise.withResolvers<void>();
+    cdpService.warmupPrimaryPage.mockReturnValueOnce(warm.promise as any);
+
+    const start = service.startSession({
+      ...baseStartOptions("00000000-0000-4000-8000-000000000011"),
+      warmup: { url: warmupUrl },
+    });
+
+    await vi.waitFor(() => expect(cdpService.warmupPrimaryPage).toHaveBeenCalledTimes(1));
+    expect(service.activeSession.status).toBe("idle");
+
+    warm.resolve();
+
+    await expect(start).resolves.toMatchObject({
+      id: "00000000-0000-4000-8000-000000000011",
+      status: "live",
+    });
+    expect(service.activeSession.status).toBe("live");
+
+    await service.endSession();
+  });
+
+  it("never calls warmup for cold creates, which go live before launch resolves", async () => {
+    const { cdpService, service } = createService();
+    const launch = Promise.withResolvers<object>();
+    cdpService.startNewSession.mockReturnValueOnce(launch.promise as any);
+
+    const start = service.startSession(baseStartOptions("00000000-0000-4000-8000-000000000012"));
+
+    await vi.waitFor(() => expect(cdpService.startNewSession).toHaveBeenCalledTimes(1));
+    expect(service.activeSession.status).toBe("live");
+
+    launch.resolve({});
+    await start;
+
+    expect(cdpService.warmupPrimaryPage).not.toHaveBeenCalled();
+
+    await service.endSession();
+  });
+
+  it("tears down the browser, cleans the profile, and resets to idle when warmup fails", async () => {
+    const { cdpService, service } = createService();
+    cdpService.warmupPrimaryPage.mockRejectedValueOnce(new Error("navigation failed"));
+
+    await expect(
+      service.startSession({
+        ...baseStartOptions("00000000-0000-4000-8000-000000000013"),
+        warmup: { url: warmupUrl },
+      }),
+    ).rejects.toBeInstanceOf(WarmupFailedError);
+
+    const failedProfileDir = cdpService.startNewSession.mock.calls[0][0].userDataDir;
+
+    expect(cdpService.endSession).toHaveBeenCalledOnce();
+    expect(await exists(failedProfileDir)).toBe(false);
+    expect(service.activeSession.status).toBe("idle");
+    expect(service.activeSession.id).not.toBe("00000000-0000-4000-8000-000000000013");
+  });
+
+  it("queues a release behind an in-flight warm start", async () => {
+    const { cdpService, service } = createService();
+    const warm = Promise.withResolvers<void>();
+    cdpService.warmupPrimaryPage.mockReturnValueOnce(warm.promise as any);
+
+    const start = service.startSession({
+      ...baseStartOptions("00000000-0000-4000-8000-000000000014"),
+      warmup: { url: warmupUrl },
+    });
+
+    await vi.waitFor(() => expect(cdpService.warmupPrimaryPage).toHaveBeenCalledTimes(1));
+
+    const release = service.endSession();
+
+    await Promise.resolve();
+    expect(cdpService.endSession).not.toHaveBeenCalled();
+
+    warm.resolve();
+    await start;
+    await release;
+
+    const profileDir = cdpService.startNewSession.mock.calls[0][0].userDataDir;
+
+    expect(cdpService.endSession).toHaveBeenCalledOnce();
+    expect(await exists(profileDir)).toBe(false);
+    expect(service.activeSession.status).toBe("idle");
+  });
+
+  it("rejects a stale release queued during warmup and the warm session survives", async () => {
+    const { cdpService, service } = createService();
+    const warm = Promise.withResolvers<void>();
+    cdpService.warmupPrimaryPage.mockReturnValueOnce(warm.promise as any);
+
+    const start = service.startSession({
+      ...baseStartOptions("00000000-0000-4000-8000-000000000015"),
+      warmup: { url: warmupUrl },
+    });
+
+    await vi.waitFor(() => expect(cdpService.warmupPrimaryPage).toHaveBeenCalledTimes(1));
+
+    const staleRelease = service.endSessionById("00000000-0000-4000-8000-000000000016");
+    staleRelease.catch(() => {});
+
+    await Promise.resolve();
+    expect(cdpService.endSession).not.toHaveBeenCalled();
+
+    warm.resolve();
+    await start;
+
+    await expect(staleRelease).rejects.toBeInstanceOf(SessionNotCurrentError);
+    expect(cdpService.endSession).not.toHaveBeenCalled();
+    expect(service.activeSession.id).toBe("00000000-0000-4000-8000-000000000015");
+    expect(service.activeSession.status).toBe("live");
+
+    await service.endSession();
   });
 });

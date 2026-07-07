@@ -14,6 +14,7 @@ import {
 import { IProxyServer, ProxyServer } from "../utils/proxy.js";
 import { getBaseUrl, getUrl } from "../utils/url.js";
 import { CDPService } from "./cdp/cdp.service.js";
+import { WarmupFailedError } from "./cdp/utils/warmup.js";
 import { ShutdownReason } from "./cdp/plugins/core/base-plugin.js";
 import { CookieData } from "./context/types.js";
 import { FileService } from "./file.service.js";
@@ -55,6 +56,19 @@ const ephemeralProfileRoot = path.join(os.tmpdir(), "steel-sessions");
 // (and GET /v1/sessions) without bound. Evicting old released sessions is safe
 // for by-ID lookups: any non-current ID already answers as a "released" stub.
 const MAX_PAST_SESSIONS = 100;
+
+// Warmup holds the lifecycle lock while it runs, so its budget is clamped to
+// stay well under the broker's warm-create timeout.
+const DEFAULT_WARMUP_TIMEOUT_MS = 20_000;
+const MIN_WARMUP_TIMEOUT_MS = 1_000;
+const MAX_WARMUP_TIMEOUT_MS = 60_000;
+
+export interface SessionWarmupOptions {
+  url: string;
+  initScript?: string;
+  readyExpression?: string;
+  timeoutMs?: number;
+}
 
 export type ProxyFactory = (
   proxyUrl: string,
@@ -145,6 +159,7 @@ export class SessionService {
     headless?: boolean;
     dangerouslyLogRequestDetails?: boolean;
     caCertificates?: string[];
+    warmup?: SessionWarmupOptions;
   }): Promise<SessionDetails> {
     return this.runWithLifecycleLock("startSession", () => this.startSessionLocked(options));
   }
@@ -174,9 +189,14 @@ export class SessionService {
     headless?: boolean;
     dangerouslyLogRequestDetails?: boolean;
     caCertificates?: string[];
+    warmup?: SessionWarmupOptions;
   }): Promise<SessionDetails> {
     if (this.activeSession.status === "live") {
       throw new SessionAlreadyActiveError(this.activeSession.id);
+    }
+
+    if (options.warmup && options.isSelenium) {
+      throw new Error("warmup is not supported for selenium sessions");
     }
 
     const {
@@ -200,6 +220,7 @@ export class SessionService {
       headless,
       dangerouslyLogRequestDetails,
       caCertificates,
+      warmup,
     } = options;
     const resolvedSessionId = sessionId || uuidv4();
 
@@ -227,9 +248,11 @@ export class SessionService {
           }
         : resolvedDimensions;
 
+    // Warm creates stay "idle" until the warmup page is ready, so a GET
+    // mid-warmup never reports a session as live before it is attachable.
     await this.resetSessionInfo({
       id: resolvedSessionId,
-      status: "live",
+      status: warmup ? "idle" : "live",
       proxy: proxyUrl,
       solveCaptcha: false,
       dimensions: finalDimensions,
@@ -315,7 +338,34 @@ export class SessionService {
       } else {
         await this.cdpService.startNewSession(browserLauncherOptions);
 
+        if (warmup) {
+          try {
+            await this.cdpService.warmupPrimaryPage({
+              url: warmup.url,
+              initScript: warmup.initScript,
+              readyExpression: warmup.readyExpression,
+              timeoutMs: Math.min(
+                Math.max(warmup.timeoutMs ?? DEFAULT_WARMUP_TIMEOUT_MS, MIN_WARMUP_TIMEOUT_MS),
+                MAX_WARMUP_TIMEOUT_MS,
+              ),
+            });
+          } catch (error) {
+            // Chrome IS running here — the generic start-failure catch below
+            // only cleans the profile dir. Tear the browser down so the pod
+            // ends in the same state as after a normal release.
+            await this.cdpService.endSession().catch((teardownError) => {
+              this.logger.warn(
+                `[SessionService] Failed to tear down browser after warmup failure: ${teardownError}`,
+              );
+            });
+            throw error instanceof WarmupFailedError
+              ? error
+              : new WarmupFailedError(warmup.url, "navigation", error);
+          }
+        }
+
         Object.assign(this.activeSession, {
+          status: "live",
           websocketUrl: getBaseUrl("ws"),
           debugUrl: getUrl("v1/sessions/debug"),
           debuggerUrl: getUrl("v1/devtools/inspector.html"),

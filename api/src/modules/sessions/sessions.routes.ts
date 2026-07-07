@@ -50,6 +50,15 @@ async function routes(server: FastifyInstance) {
         body: $ref("CreateSession"),
         response: {
           200: $ref("SessionDetails"),
+          502: {
+            type: "object",
+            description: "Session warmup failed; the browser has been torn down",
+            properties: {
+              success: { type: "boolean" },
+              code: { type: "string" },
+              message: { type: "string" },
+            },
+          },
         },
       },
     },

@@ -8,6 +8,7 @@ import {
   SessionAlreadyActiveError,
   SessionNotCurrentError,
 } from "../../services/session.service.js";
+import { WarmupFailedError } from "../../services/cdp/utils/warmup.js";
 
 export const handleLaunchBrowserSession = async (
   server: FastifyInstance,
@@ -33,7 +34,20 @@ export const handleLaunchBrowserSession = async (
       userPreferences,
       deviceConfig,
       headless,
+      warmupUrl,
+      warmupInitScript,
+      warmupReadyExpression,
+      warmupTimeoutMs,
     } = request.body;
+
+    // Request bodies are validated by AJV against the JSON-schema form of
+    // CreateSession, which cannot express this cross-field rule — enforce it
+    // here (the zod superRefine covers zod-level consumers only).
+    if (warmupUrl && isSelenium) {
+      return reply
+        .code(400)
+        .send({ success: false, message: "warmup is not supported for selenium sessions" });
+    }
 
     const session = await server.sessionService.startSession({
       sessionId,
@@ -56,6 +70,14 @@ export const handleLaunchBrowserSession = async (
       userPreferences,
       deviceConfig,
       headless,
+      warmup: warmupUrl
+        ? {
+            url: warmupUrl,
+            initScript: warmupInitScript,
+            readyExpression: warmupReadyExpression,
+            timeoutMs: warmupTimeoutMs,
+          }
+        : undefined,
     });
 
     return {
@@ -70,6 +92,9 @@ export const handleLaunchBrowserSession = async (
     const error = getErrors(e);
     if (e instanceof SessionAlreadyActiveError) {
       return reply.code(409).send({ success: false, message: error });
+    }
+    if (e instanceof WarmupFailedError) {
+      return reply.code(502).send({ success: false, code: "warmup_failed", message: error });
     }
     return reply.code(500).send({ success: false, message: error });
   }
