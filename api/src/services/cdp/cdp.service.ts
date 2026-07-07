@@ -78,6 +78,7 @@ import {
   BrowserLogger,
 } from "./instrumentation/browser-logger.js";
 import { executeBestEffort, executeCritical, executeOptional } from "./utils/error-handlers.js";
+import { runPageWarmup, WarmupOptions } from "./utils/warmup.js";
 import { TimezoneFetcher } from "../timezone-fetcher.service.js";
 
 export class CDPService extends EventEmitter {
@@ -247,6 +248,16 @@ export class CDPService extends EventEmitter {
       this.primaryPage = await this.browserInstance.newPage();
     }
     return this.primaryPage;
+  }
+
+  /**
+   * Navigate the primary page (the tab an attaching CDP client adopts) to a
+   * warmup URL and block until it is ready. SessionService orchestrates this
+   * and owns teardown when it fails.
+   */
+  public async warmupPrimaryPage(options: WarmupOptions): Promise<void> {
+    const page = await this.getPrimaryPage();
+    await runPageWarmup(page, options, this.logger);
   }
 
   private getDebuggerBase(): { baseUrl: string; protocol: string; wsProtocol: string } {
