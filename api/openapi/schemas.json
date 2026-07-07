@@ -33,6 +33,9 @@
           "pdf": {
             "type": "boolean"
           },
+          "removeBase64Images": {
+            "type": "boolean"
+          },
           "proxyUrl": {
             "type": "string",
             "nullable": true,
@@ -111,6 +114,9 @@
                 "type": "string"
               },
               "jsonLd": {},
+              "wordCount": {
+                "type": "number"
+              },
               "statusCode": {
                 "type": "integer"
               }
@@ -203,6 +209,60 @@
       },
       "PDFResponse": {
         "title": "PDFResponse"
+      },
+      "SearchRequest": {
+        "title": "SearchRequest",
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "proxyUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Proxy URL to use for the scrape. Provide `null` to disable proxy. If not provided, current session proxy settings will be used."
+          },
+          "logUrl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "SearchResponse": {
+        "title": "SearchResponse",
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "title",
+                "url"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "additionalProperties": false
       },
       "CreateSession": {
         "title": "CreateSession",
@@ -504,7 +564,11 @@
               }
             },
             "additionalProperties": false,
-            "description": "Device configuration for the session. Specify 'mobile' for mobile device fingerprints and configurations."
+            "description": "Device configuration for the session"
+          },
+          "fullscreen": {
+            "type": "boolean",
+            "description": "Launch the browser in fullscreen mode, covering the full screen with no Chrome UI."
           },
           "logSinkUrl": {
             "type": "string",
@@ -596,6 +660,28 @@
           "headless": {
             "type": "boolean",
             "description": "Headless mode for the session"
+          },
+          "warmupUrl": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https?:\\/\\/",
+            "description": "Navigate the session's initial page to this URL and block the create response until it is ready"
+          },
+          "warmupInitScript": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "JS evaluated on every new document of the warmup page BEFORE navigation (Page.addScriptToEvaluateOnNewDocument parity with client-side addInitScript)"
+          },
+          "warmupReadyExpression": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "JS expression polled in the warmup page until truthy (e.g. '!!window.renderGmlPreview')"
+          },
+          "warmupTimeoutMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 60000,
+            "description": "Overall warmup budget (navigation + readiness). Default 20000."
           }
         },
         "additionalProperties": false
@@ -698,6 +784,21 @@
           "isSelenium": {
             "type": "boolean",
             "description": "Indicates if Selenium is used in the session"
+          },
+          "deviceConfig": {
+            "type": "object",
+            "properties": {
+              "device": {
+                "type": "string",
+                "enum": [
+                  "desktop",
+                  "mobile"
+                ],
+                "default": "desktop"
+              }
+            },
+            "additionalProperties": false,
+            "description": "Device configuration for the session"
           }
         },
         "required": [
@@ -820,6 +921,21 @@
                 "isSelenium": {
                   "type": "boolean",
                   "description": "Indicates if Selenium is used in the session"
+                },
+                "deviceConfig": {
+                  "type": "object",
+                  "properties": {
+                    "device": {
+                      "type": "string",
+                      "enum": [
+                        "desktop",
+                        "mobile"
+                      ],
+                      "default": "desktop"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Device configuration for the session"
                 }
               },
               "required": [
@@ -1181,6 +1297,21 @@
           "isSelenium": {
             "type": "boolean",
             "description": "Indicates if Selenium is used in the session"
+          },
+          "deviceConfig": {
+            "type": "object",
+            "properties": {
+              "device": {
+                "type": "string",
+                "enum": [
+                  "desktop",
+                  "mobile"
+                ],
+                "default": "desktop"
+              }
+            },
+            "additionalProperties": false,
+            "description": "Device configuration for the session"
           },
           "success": {
             "type": "boolean",
@@ -1770,6 +1901,37 @@
         }
       }
     },
+    "/v1/search": {
+      "post": {
+        "operationId": "search",
+        "summary": "Use a search engine to search for URLs given a query",
+        "tags": [
+          "Browser Actions"
+        ],
+        "description": "Use a search engine to search for URLs given a query",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/health": {
       "get": {
         "operationId": "health",
@@ -1809,6 +1971,28 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SessionDetails"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Session warmup failed; the browser has been torn down",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Session warmup failed; the browser has been torn down",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
@@ -1907,7 +2091,7 @@
         "tags": [
           "Sessions"
         ],
-        "description": "Release a browser session",
+        "description": "Release the browser session with the given ID. Returns 404 if that session is not the current live session.",
         "parameters": [
           {
             "schema": {
@@ -1925,6 +2109,24 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ReleaseSession"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
@@ -2585,7 +2787,7 @@
   },
   "servers": [
     {
-      "url": "http://0.0.0.0:3000/",
+      "url": "http://localhost:3000/",
       "description": "Local server"
     },
     {
