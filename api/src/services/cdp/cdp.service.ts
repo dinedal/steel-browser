@@ -357,7 +357,13 @@ export class CDPService extends EventEmitter {
 
         // Only install mouse helper in headless mode
         if (this.launchConfig?.options?.headless) {
-          installMouseHelper(page, this.launchConfig?.deviceConfig?.device || "desktop");
+          await executeBestEffort(
+            this.logger,
+            async () => {
+              await installMouseHelper(page, this.launchConfig?.deviceConfig?.device || "desktop");
+            },
+            "Error installing mouse helper",
+          );
         }
 
         if (this.launchConfig?.customHeaders) {
