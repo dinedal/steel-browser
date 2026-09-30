@@ -101,6 +101,7 @@ COPY --chmod=755 api/entrypoint.sh /app/api/entrypoint.sh
 EXPOSE 3000 9223
 
 ENV HOST_IP=localhost \
+    DEFAULT_TIMEZONE=UTC \
     DBUS_SESSION_BUS_ADDRESS=autolaunch:
 
 ENTRYPOINT ["/app/api/entrypoint.sh"]
