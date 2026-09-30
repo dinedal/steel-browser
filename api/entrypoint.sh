@@ -17,7 +17,7 @@ init_dbus() {
         rm -f /var/run/dbus/pid
     fi
 
-    dbus-daemon --system --fork
+    dbus-daemon --system --nofork &
     sleep 2  # Give DBus time to initialize
 
     if dbus-send --system --print-reply --dest=org.freedesktop.DBus \
@@ -66,13 +66,19 @@ verify_chrome() {
 start_nginx() {
     if [ "$START_NGINX" = "true" ]; then
         log "Starting nginx..."
-        nginx -c /app/api/nginx.conf
+        # Keep nginx in the process group signalled by the container init.
+        nginx -c /app/api/nginx.conf -g 'daemon off;' &
+        nginx_pid=$!
         
         # Wait for nginx to start
         max_attempts=10
         attempt=1
         while [ $attempt -le $max_attempts ]; do
-            if nginx -t >/dev/null 2>&1; then
+            if ! kill -0 "$nginx_pid" 2>/dev/null; then
+                log "ERROR: Nginx exited during startup"
+                return 1
+            fi
+            if nginx -t -c /app/api/nginx.conf >/dev/null 2>&1; then
                 log "Nginx started successfully"
                 return 0
             fi

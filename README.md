@@ -106,6 +106,15 @@ For Mac Silicon users, you will need to pass this env flag to the Docker compose
 DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up
 ```
 
+Images built from `Dockerfile` and `api/Dockerfile` run under Tini as PID 1 to
+reap orphaned browser processes and forward signals to the application's process
+group. nginx and debug DBus stay in that group; Puppeteer manages its detached
+Chromium process. Preserve the image entrypoint when deploying to Kubernetes.
+
+Check a locally built image with `node scripts/test-container-init.mjs IMAGE`.
+The check exercises orphan reaping, signal forwarding, helper process groups,
+and exit status without Docker's `--init` option.
+
 ## Quickstart for Contributors
 When developing locally, you will need to run the [`docker-compose.dev.yml`](./docker-compose.dev.yml) file instead of the default [`docker-compose.yml`](./docker-compose.yml) file so that your local changes are reflected. Doing this will build the Docker images from the [`api`](./api) and [`ui`](./ui) directories and run the server and UI on port 3000 and 5173 respectively.
 

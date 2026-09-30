@@ -63,6 +63,7 @@ FROM base AS production
 # Install dependencies
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
+    tini \
     wget \
     nginx \
     gnupg \
@@ -104,6 +105,6 @@ ENV HOST_IP=localhost \
     DEFAULT_TIMEZONE=UTC \
     DBUS_SESSION_BUS_ADDRESS=autolaunch:
 
-ENTRYPOINT ["/app/api/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/app/api/entrypoint.sh"]
 
 COPY --from=build /app /app
