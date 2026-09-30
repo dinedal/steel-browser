@@ -232,7 +232,9 @@ export class CDPService extends EventEmitter {
   }
 
   public isRunning(): boolean {
-    return this.browserInstance?.process() !== null;
+    const browser = this.browserInstance;
+
+    return browser?.connected === true && browser.process() !== null;
   }
 
   public getTargetId(page: Page) {
@@ -295,6 +297,45 @@ export class CDPService extends EventEmitter {
 
   public unregisterPlugin(pluginName: string) {
     return this.pluginManager.unregister(pluginName);
+  }
+
+  private async runEventHandler(event: string, operation: () => Promise<void>): Promise<void> {
+    // Event emitters discard returned promises; keep failures owned at the callback boundary.
+    try {
+      await operation();
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error({ err, event }, "[CDPService] Event handler failed");
+    }
+  }
+
+  private registerBrowserHandlers(browser: Browser): void {
+    browser.on("targetcreated", (target) => {
+      void this.runEventHandler("targetcreated", async () => {
+        try {
+          await this.handleNewTarget(target);
+        } catch (error) {
+          // Required setup includes request interception. Do not leave an unprotected page open.
+          await this.runEventHandler("targetcreated.close", async () => {
+            const page = await target.page();
+            if (page) {
+              await page.close();
+            }
+          });
+          throw error;
+        }
+      });
+    });
+    browser.on("targetchanged", (target) => {
+      void this.runEventHandler("targetchanged", () => this.handleTargetChange(target));
+    });
+    browser.on("targetdestroyed", (target) => {
+      const targetId = (target as any)._targetId;
+      this.targetInstrumentationManager.detach(targetId);
+    });
+    browser.on("disconnected", () => {
+      void this.runEventHandler("disconnected", () => this.onDisconnect());
+    });
   }
 
   private async handleTargetChange(target: Target) {
@@ -390,16 +431,20 @@ export class CDPService extends EventEmitter {
 
         await page.setRequestInterception(true);
 
-        page.on("request", (request) => this.handlePageRequest(request, page));
+        page.on("request", (request) => {
+          void this.runEventHandler("request", () => this.handlePageRequest(request, page));
+        });
 
         page.on("response", (response) => {
-          if (response.url().startsWith("file://")) {
-            this.logger.error(
-              `[CDPService] Blocked response from file protocol: ${response.url()}`,
-            );
-            page.close().catch(() => {});
-            this.endSession(ShutdownReason.SECURITY_VIOLATION);
-          }
+          void this.runEventHandler("response", async () => {
+            if (response.url().startsWith("file://")) {
+              this.logger.error(
+                `[CDPService] Blocked response from file protocol: ${response.url()}`,
+              );
+              page.close().catch(() => {});
+              await this.endSession(ShutdownReason.SECURITY_VIOLATION);
+            }
+          });
         });
       }
     } else if (target.type() === TargetType.BACKGROUND_PAGE) {
@@ -458,7 +503,7 @@ export class CDPService extends EventEmitter {
     if (url.startsWith("file://")) {
       this.logger.error(`[CDPService] Blocked request to file protocol: ${url}`);
       page.close().catch(() => {});
-      this.endSession(ShutdownReason.SECURITY_VIOLATION);
+      await this.endSession(ShutdownReason.SECURITY_VIOLATION);
     } else {
       await request.continue({ headers });
     }
@@ -1028,13 +1073,7 @@ export class CDPService extends EventEmitter {
           "Failed to configure download behavior",
         );
 
-        this.browserInstance.on("targetcreated", this.handleNewTarget.bind(this));
-        this.browserInstance.on("targetchanged", this.handleTargetChange.bind(this));
-        this.browserInstance.on("targetdestroyed", (target) => {
-          const targetId = (target as any)._targetId;
-          this.targetInstrumentationManager.detach(targetId);
-        });
-        this.browserInstance.on("disconnected", this.onDisconnect.bind(this));
+        this.registerBrowserHandlers(this.browserInstance);
 
         this.wsEndpoint = await executeCritical(
           async () => this.browserInstance!.wsEndpoint(),
