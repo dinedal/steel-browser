@@ -56,6 +56,10 @@ export class TimezoneFetcher {
   }
 
   public async getTimezone(proxyUrl?: string, fallback?: string): Promise<string> {
+    if (env.DEFAULT_TIMEZONE) {
+      return env.DEFAULT_TIMEZONE;
+    }
+
     const startTime = Date.now();
     try {
       const result = await this.startFetch(proxyUrl);
