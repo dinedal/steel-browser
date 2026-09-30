@@ -24,6 +24,12 @@ jobs:
       - name: Build the latest Steel Browser API image
         run: |
           docker build -t steel-browser-api -f ./api/Dockerfile .
+
+      - name: Test container init
+        run: |
+          node scripts/test-container-init.mjs steel-browser
+          node scripts/test-container-init.mjs steel-browser-api
+
       - name: Build the latest Steel Browser UI image
         run: |
           docker build -t steel-browser-ui -f ./ui/Dockerfile .
